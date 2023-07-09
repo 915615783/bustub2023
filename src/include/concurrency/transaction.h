@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include <fmt/format.h>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -65,16 +64,15 @@ using index_oid_t = uint32_t;
  */
 class TableWriteRecord {
  public:
-  // NOLINTNEXTLINE
-  TableWriteRecord(table_oid_t tid, RID rid, TableHeap *table_heap) : tid_(tid), rid_(rid), table_heap_(table_heap) {}
+  TableWriteRecord(RID rid, WType wtype, const Tuple &tuple, TableHeap *table)
+      : rid_(rid), wtype_(wtype), tuple_(tuple), table_(table) {}
 
-  table_oid_t tid_;
   RID rid_;
-  TableHeap *table_heap_;
-
-  // Recording write type might be useful if you want to implement in-place update for leaderboard
-  // optimization. You don't need it for the basic implementation.
   WType wtype_;
+  /** The tuple is only used for the update operation. */
+  Tuple tuple_;
+  /** The table heap specifies which table this write record is for. */
+  TableHeap *table_;
 };
 
 /**
@@ -82,15 +80,9 @@ class TableWriteRecord {
  */
 class IndexWriteRecord {
  public:
-  // NOLINTNEXTLINE
   IndexWriteRecord(RID rid, table_oid_t table_oid, WType wtype, const Tuple &tuple, index_oid_t index_oid,
                    Catalog *catalog)
       : rid_(rid), table_oid_(table_oid), wtype_(wtype), tuple_(tuple), index_oid_(index_oid), catalog_(catalog) {}
-
-  /**
-   * Note(spring2023): I don't know what are these for. If you are implementing leaderboard optimizations, you can
-   * figure out how to use this structure to store what you need.
-   */
 
   /** The rid is the value stored in the index. */
   RID rid_;
@@ -171,6 +163,8 @@ class Transaction {
         thread_id_(std::this_thread::get_id()),
         txn_id_(txn_id),
         prev_lsn_(INVALID_LSN),
+        shared_lock_set_{new std::unordered_set<RID>},
+        exclusive_lock_set_{new std::unordered_set<RID>},
         s_table_lock_set_{new std::unordered_set<table_oid_t>},
         x_table_lock_set_{new std::unordered_set<table_oid_t>},
         is_table_lock_set_{new std::unordered_set<table_oid_t>},
@@ -238,10 +232,16 @@ class Transaction {
    */
   inline void AddIntoDeletedPageSet(page_id_t page_id) { deleted_page_set_->insert(page_id); }
 
+  /** @return the set of resources under a shared lock */
+  inline auto GetSharedLockSet() -> std::shared_ptr<std::unordered_set<RID>> { return shared_lock_set_; }
+
   /** @return the set of rows under a shared lock */
   inline auto GetSharedRowLockSet() -> std::shared_ptr<std::unordered_map<table_oid_t, std::unordered_set<RID>>> {
     return s_row_lock_set_;
   }
+
+  /** @return the set of resources under an exclusive lock */
+  inline auto GetExclusiveLockSet() -> std::shared_ptr<std::unordered_set<RID>> { return exclusive_lock_set_; }
 
   /** @return the set of rows in under an exclusive lock */
   inline auto GetExclusiveRowLockSet() -> std::shared_ptr<std::unordered_map<table_oid_t, std::unordered_set<RID>>> {
@@ -347,6 +347,11 @@ class Transaction {
   /** Concurrent index: the page IDs that were deleted during index operation.*/
   std::shared_ptr<std::unordered_set<page_id_t>> deleted_page_set_;
 
+  /** LockManager: the set of shared-locked tuples held by this transaction. */
+  std::shared_ptr<std::unordered_set<RID>> shared_lock_set_;
+  /** LockManager: the set of exclusive-locked tuples held by this transaction. */
+  std::shared_ptr<std::unordered_set<RID>> exclusive_lock_set_;
+
   /** LockManager: the set of table locks held by this transaction. */
   std::shared_ptr<std::unordered_set<table_oid_t>> s_table_lock_set_;
   std::shared_ptr<std::unordered_set<table_oid_t>> x_table_lock_set_;
@@ -360,25 +365,3 @@ class Transaction {
 };
 
 }  // namespace bustub
-
-template <>
-struct fmt::formatter<bustub::IsolationLevel> : formatter<std::string_view> {
-  // parse is inherited from formatter<string_view>.
-  template <typename FormatContext>
-  auto format(bustub::IsolationLevel x, FormatContext &ctx) const {
-    using bustub::IsolationLevel;
-    string_view name = "unknown";
-    switch (x) {
-      case IsolationLevel::READ_UNCOMMITTED:
-        name = "READ_UNCOMMITTED";
-        break;
-      case IsolationLevel::READ_COMMITTED:
-        name = "READ_COMMITTED";
-        break;
-      case IsolationLevel::REPEATABLE_READ:
-        name = "REPEATABLE_READ";
-        break;
-    }
-    return formatter<string_view>::format(name, ctx);
-  }
-};
